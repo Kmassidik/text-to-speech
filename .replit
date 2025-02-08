@@ -1,0 +1,23 @@
+run = "npm start"
+modules = ["nodejs-18:v3-20230608-f4cd419"]
+hidden = [".config", "package-lock.json"]
+
+[nix]
+channel = "stable-23_11"
+
+[deployment]
+run = ["sh", "-c", "npm start"]
+deploymentTarget = "cloudrun"
+ignorePorts = false
+
+[languages]
+
+[languages.javascript]
+pattern = "**/{*.js,*.jsx,*.ts,*.tsx}"
+
+[languages.javascript.languageServer]
+start = "typescript-language-server --stdio"
+
+[[ports]]
+localPort = 3000
+externalPort = 80
