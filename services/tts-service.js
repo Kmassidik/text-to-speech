@@ -39,6 +39,7 @@ class TextToSpeechService extends EventEmitter {
        try {
          // Convert audio response to base64 format
          const blob = await response.blob();
+         console.log(blob, "<<<<<<<<<< blob")
          const audioArrayBuffer = await blob.arrayBuffer();
          const base64String = Buffer.from(audioArrayBuffer).toString('base64');
 
