@@ -16,6 +16,7 @@ const { TextToSpeechService } = require('./services/tts-service');
 const VoiceResponse = require('twilio').twiml.VoiceResponse;
 
 const { MinimaxiTTSService } = require('./services/minimax-tts');
+const { TextToSpeechService2 } = require('./services/tts-service-2');
 
 // Set up Express with WebSocket support
 const app = express();
@@ -29,7 +30,9 @@ app.post('/incoming', (req, res) => {
     const response = new VoiceResponse();
     const connect = response.connect();
     // Tell Twilio where to connect the call's media stream
-    connect.stream({ url: `wss://${process.env.SERVER}/connection-v2` });
+    // connect.stream({ url: `wss://${process.env.SERVER}/connection` });
+    // connect.stream({ url: `wss://${process.env.SERVER}/connection-v2` });
+    connect.stream({ url: `wss://${process.env.SERVER}/connection-v3` });
     res.type('text/xml');
     res.end(response.toString());
   } catch (err) {
@@ -133,50 +136,44 @@ app.ws('/connection-v2', (ws) => {
     const gptService = new GptService();
     const streamService = new StreamService(ws);
     const transcriptionService = new TranscriptionService();
-
-    // Use our Minimaxi-based TTS
-    const ttsService2 = new MinimaxiTTSService();
+    const ttsService = new MinimaxiTTSService({});
 
     let marks = [];              // Track audio completion markers
     let interactionCount = 0;    // Count back-and-forth exchanges
 
-    // -- same logic as your old route:
-
+    // Handle incoming messages from Twilio
     ws.on('message', function message(data) {
       const msg = JSON.parse(data);
 
       if (msg.event === 'start') {
+        // Call started - set up IDs and send welcome message
         streamSid = msg.start.streamSid;
         callSid = msg.start.callSid;
         streamService.setStreamSid(streamSid);
         gptService.setCallSid(callSid);
-
-        console.log(`(v2) Twilio -> Starting Media Stream for ${streamSid}`.underline.red);
-
-        // Provide a welcome message
-        ttsService2.generate(
-          { partialResponseIndex: null, partialResponse: 'Welcome to Cybersphere Automotive. • Apa Yang Dapat Saya Bantu Hari Ini?' },
-          0
-        );
+        console.log(`Twilio -> Starting Media Stream for ${streamSid}`.underline.red);
+        ttsService.generate({ partialResponseIndex: null, partialResponse: 'Welcome to Cybersphere Automotive. • How can I help you today?' }, 0);
       }
       else if (msg.event === 'media') {
-        // Incoming caller audio => transcription
+        // Received audio from caller - send to transcription
         transcriptionService.send(msg.media.payload);
       }
       else if (msg.event === 'mark') {
+        // Audio piece finished playing
         const label = msg.mark.name;
-        console.log(`(v2) Twilio -> Audio completed mark (${msg.sequenceNumber}): ${label}`.red);
+        console.log(`Twilio -> Audio completed mark (${msg.sequenceNumber}): ${label}`.red);
         marks = marks.filter(m => m !== msg.mark.name);
       }
       else if (msg.event === 'stop') {
-        console.log(`(v2) Twilio -> Media stream ${streamSid} ended.`.underline.red);
+        // Call ended
+        console.log(`Twilio -> Media stream ${streamSid} ended.`.underline.red);
       }
     });
 
-    // Handle interruptions
+    // Handle interruptions (caller speaking while assistant is)
     transcriptionService.on('utterance', async (text) => {
       if (marks.length > 0 && text?.length > 5) {
-        console.log('(v2) Twilio -> Interruption, Clearing stream'.red);
+        console.log('Twilio -> Interruption, Clearing stream'.red);
         ws.send(
           JSON.stringify({
             streamSid,
@@ -189,33 +186,116 @@ app.ws('/connection-v2', (ws) => {
     // Process transcribed text through GPT
     transcriptionService.on('transcription', async (text) => {
       if (!text) { return; }
-      console.log(`(v2) Interaction ${interactionCount} – STT -> GPT: ${text}`.yellow);
+      console.log(`Interaction ${interactionCount} – STT -> GPT: ${text}`.yellow);
       gptService.completion(text, interactionCount);
       interactionCount += 1;
     });
 
-    // GPT => Minimaxi TTS
+    // Send GPT's response to text-to-speech
     gptService.on('gptreply', async (gptReply, icount) => {
-      console.log(`(v2) Interaction ${icount}: GPT -> TTS: ${gptReply.partialResponse}`.green);
-      ttsService2.generate(gptReply, icount);
+      console.log(`Interaction ${icount}: GPT -> TTS: ${gptReply.partialResponse}`.green);
+      ttsService.generate(gptReply, icount);
     });
 
-    // When Minimaxi TTS is done, we have audio => stream to Twilio
-    ttsService2.on('speech', (responseIndex, audioBase64, label, icount) => {
-      console.log(`(v2) Interaction ${icount}: TTS -> TWILIO: ${label}`.blue);
-      streamService.buffer(responseIndex, audioBase64);
+    // Send converted speech to caller
+    ttsService.on('speech', (responseIndex, audio, label, icount) => {
+      console.log(`Interaction ${icount}: TTS -> TWILIO: ${label}`.blue);
+      streamService.buffer(responseIndex, audio);
     });
 
-    // Keep track of playing audio
+    // Track when audio pieces are sent
     streamService.on('audiosent', (markLabel) => {
       marks.push(markLabel);
     });
-
   } catch (err) {
-    console.log('(v2) Error in /connection-v2:', err);
+    console.log(err);
   }
 });
 
+app.ws('/connection-v3', (ws) => {
+  try {
+    ws.on('error', console.error);
+
+    // Variables to track the call and its audio
+    let streamSid;
+    let callSid;
+    const gptService = new GptService();
+    const streamService = new StreamService(ws);
+    const transcriptionService = new TranscriptionService();
+    const ttsService = new TextToSpeechService2({});
+    let marks = [];              // Track audio completion markers
+    let interactionCount = 0;    // Count back-and-forth exchanges
+
+    // Handle incoming messages from Twilio
+    ws.on('message', function message(data) {
+      const msg = JSON.parse(data);
+
+      if (msg.event === 'start') {
+        // Call started - set up IDs and send welcome message
+        streamSid = msg.start.streamSid;
+        callSid = msg.start.callSid;
+        streamService.setStreamSid(streamSid);
+        gptService.setCallSid(callSid);
+        console.log(`Twilio -> Starting Media Stream for ${streamSid}`.underline.red);
+        ttsService.generate({ partialResponseIndex: null, partialResponse: 'Welcome to Cybersphere Automotive. • How can I help you today?' }, 0);
+      }
+      else if (msg.event === 'media') {
+        // Received audio from caller - send to transcription
+        transcriptionService.send(msg.media.payload);
+      }
+      else if (msg.event === 'mark') {
+        // Audio piece finished playing
+        const label = msg.mark.name;
+        console.log(`Twilio -> Audio completed mark (${msg.sequenceNumber}): ${label}`.red);
+        marks = marks.filter(m => m !== msg.mark.name);
+      }
+      else if (msg.event === 'stop') {
+        // Call ended
+        console.log(`Twilio -> Media stream ${streamSid} ended.`.underline.red);
+      }
+    });
+
+    // Handle interruptions (caller speaking while assistant is)
+    transcriptionService.on('utterance', async (text) => {
+      if (marks.length > 0 && text?.length > 5) {
+        console.log('Twilio -> Interruption, Clearing stream'.red);
+        ws.send(
+          JSON.stringify({
+            streamSid,
+            event: 'clear',
+          })
+        );
+      }
+    });
+
+    // Process transcribed text through GPT
+    transcriptionService.on('transcription', async (text) => {
+      if (!text) { return; }
+      console.log(`Interaction ${interactionCount} – STT -> GPT: ${text}`.yellow);
+      gptService.completion(text, interactionCount);
+      interactionCount += 1;
+    });
+
+    // Send GPT's response to text-to-speech
+    gptService.on('gptreply', async (gptReply, icount) => {
+      console.log(`Interaction ${icount}: GPT -> TTS: ${gptReply.partialResponse}`.green);
+      ttsService.generate(gptReply, icount);
+    });
+
+    // Send converted speech to caller
+    ttsService.on('speech', (responseIndex, audio, label, icount) => {
+      console.log(`Interaction ${icount}: TTS -> TWILIO: ${label}`.blue);
+      streamService.buffer(responseIndex, audio);
+    });
+
+    // Track when audio pieces are sent
+    streamService.on('audiosent', (markLabel) => {
+      marks.push(markLabel);
+    });
+  } catch (err) {
+    console.log(err);
+  }
+});
 
 app.get('/', (req, res) => {
   res.status(200).send("welcome")

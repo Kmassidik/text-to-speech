@@ -8,118 +8,84 @@ class MinimaxiTTSService extends EventEmitter {
     super();
   }
 
-  /**
-   * Main entry: generate TTS from GPT reply,
-   * produce mu-law chunks, emit "speech" events for Twilio <Start><Stream>
-   */
   async generate(gptReply, interactionCount) {
     const { partialResponseIndex, partialResponse } = gptReply;
     if (!partialResponse) return;
 
     try {
-      // -- 1) Dynamically import x-law, since it's an ES module
-      const xlawModule = await import('x-law');
-      const { mulaw } = xlawModule; // extract the 'mulaw' property
+      const groupId = process.env.GROUP_ID;
+      const minimaxiUrl = `https://api.minimaxi.chat/v1/t2a_v2?GroupId=${groupId}`;
 
-      // -- 2) Fetch raw PCM from Minimaxi (8kHz, 16-bit)
-      const pcmBuffer = await this._fetchMinimaxiPCM(partialResponse);
-      if (!pcmBuffer || pcmBuffer.length === 0) {
-        console.error('No PCM data from Minimaxi or buffer is empty.');
+      const ttsPayload = {
+        model: 'speech-01-hd',
+        text: partialResponse,
+        stream: false,
+        subtitle_enable: false,
+        voice_setting: {
+          voice_id: 'moss_audio_a7c066a3-dd74-11ef-befa-5ed23b965939',
+          speed: 1,
+          vol: 1,
+          pitch: 0
+        },
+        audio_setting: {
+          sample_rate: 8000,
+          // Request MP3 output from Minimaxi
+          format: 'mp3',
+        },
+      };
+
+      const response = await fetch(minimaxiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.MINIMAXI_API_KEY}`,
+        },
+        body: JSON.stringify(ttsPayload),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Minimaxi TTS error:', response.status, errorText);
         return;
       }
 
-      // -- 3) Convert PCM -> mu-law using x-law's encodeBuffer
-      //    Minimaxi's PCM is 16-bit LE, so we pass { depth:16, signed:true, littleEndian:true }
-      const encodedMulaw = mulaw.encodeBuffer(pcmBuffer, {
-        depth: 16,
-        signed: true,
-        littleEndian: true
+      const responseData = await response.json();
+      console.log('Minimaxi Response:', responseData);
+
+      if (!responseData?.data?.audio) {
+        console.error('No audio data found in response');
+        return;
+      }
+
+      // The audio from Minimaxi is assumed to be base64-encoded MP3.
+      const minimaxiAudioB64 = responseData.data.audio;
+
+      // Call the Python conversion API to convert the audio.
+      const conversionResponse = await fetch('http://localhost:5000/convert', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ audio: minimaxiAudioB64 })
       });
 
-      // -- 4) Chunk mu-law data into 20 ms frames => 160 bytes each (@8kHz => 160 samples)
-      const chunkSize = 160;
-      const muLawChunks = [];
-
-      for (let i = 0; i < encodedMulaw.length; i += chunkSize) {
-        if (i + chunkSize > encodedMulaw.length) {
-          // leftover partial chunk, skip or handle
-          console.log(`Discarding leftover ${encodedMulaw.length - i} bytes (partial chunk)`);
-          break;
-        }
-        const chunk = encodedMulaw.slice(i, i + chunkSize);
-        muLawChunks.push(chunk);
+      if (!conversionResponse.ok) {
+        const errorData = await conversionResponse.json();
+        console.error('Conversion API error:', errorData);
+        return;
       }
 
-      // -- 5) Emit "speech" events for each chunk
-      let chunkIndex = 0;
-      for (const chunk of muLawChunks) {
-        const base64String = chunk.toString('base64');
+      const conversionData = await conversionResponse.json();
+      const convertedAudioB64 = conversionData.converted_audio;
+      console.log(`Converted audio received, length: ${convertedAudioB64.length} characters`);
 
-        // Combine partialResponseIndex + chunkIndex if you want a unique index
-        const responseIndex = partialResponseIndex !== null
-          ? `${partialResponseIndex}-${chunkIndex}`
-          : chunkIndex;
-
-        // Twilio <Start><Stream> => your StreamService sends these as 'media'
-        this.emit('speech', responseIndex, base64String, partialResponse, interactionCount);
-
-        chunkIndex++;
-      }
+      // Emit the speech event with the converted audio.
+      this.emit('speech', partialResponseIndex, convertedAudioB64, partialResponse, interactionCount);
+      
     } catch (err) {
       console.error('Error in MinimaxiTTSService:', err);
     }
   }
-
-  /**
-   * Fetch Minimaxi TTS: raw PCM @ 8 kHz, 16-bit, 1 channel.
-   * Minimaxi returns hex-coded PCM => convert to a Buffer.
-   */
-  async _fetchMinimaxiPCM(text) {
-    const groupId = process.env.GROUP_ID;
-    const minimaxiUrl = `https://api.minimaxi.chat/v1/t2a_v2?GroupId=${groupId}`;
-
-    const ttsPayload = {
-      model: 'speech-01-hd',
-      text,
-      stream: false,
-      subtitle_enable: false,
-      voice_setting: {
-        voice_id: 'moss_audio_a7c066a3-dd74-11ef-befa-5ed23b965939',
-        speed: 1,
-        vol: 1,
-        pitch: 0
-      },
-      audio_setting: {
-        sample_rate: 8000, // 8 kHz
-        format: 'pcm',     // raw PCM
-        channel: 1
-      }
-    };
-
-    const response = await fetch(minimaxiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.MINIMAXI_API_KEY}`
-      },
-      body: JSON.stringify(ttsPayload),
-    });
-
-    if (!response.ok) {
-      console.error('Minimaxi TTS error:', response.status, response.statusText);
-      return null;
-    }
-
-    const data = await response.json();
-    if (!data?.data?.audio) {
-      console.error('No audio found in Minimaxi TTS response:', JSON.stringify(data, null, 2));
-      return null;
-    }
-
-    // Minimaxi returns the PCM data as hex => convert to a Buffer
-    return Buffer.from(data.data.audio, 'hex');
-  }
 }
 
-// -- 6) CommonJS export, so you can `const { MinimaxiTTSService } = require('./path')`
 module.exports = { MinimaxiTTSService };
