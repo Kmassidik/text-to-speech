@@ -31,10 +31,97 @@ app.post('/incoming', (req, res) => {
     const connect = response.connect();
     // Tell Twilio where to connect the call's media stream
     // connect.stream({ url: `wss://${process.env.SERVER}/connection` });
-    // connect.stream({ url: `wss://${process.env.SERVER}/connection-v2` });
-    connect.stream({ url: `wss://${process.env.SERVER}/connection-v3` });
+    connect.stream({ url: `wss://${process.env.SERVER}/connection-v2` });
+    // connect.stream({ url: `wss://${process.env.SERVER}/connection-v3` });
+    // connect.stream({ url: `wss://${process.env.SERVER}/connection-v4` });
     res.type('text/xml');
     res.end(response.toString());
+  } catch (err) {
+    console.log(err);
+  }
+});
+
+app.ws('/connection-v2', (ws) => {
+  try {
+    ws.on('error', console.error);
+
+    // Variables to track the call and its audio
+    let streamSid;
+    let callSid;
+    const gptService = new GptService();
+    const streamService = new StreamService(ws);
+    const transcriptionService = new TranscriptionService();
+    const ttsService = new MinimaxiTTSService({});
+
+    let marks = [];              // Track audio completion markers
+    let interactionCount = 0;    // Count back-and-forth exchanges
+
+    // Handle incoming messages from Twilio
+    ws.on('message', function message(data) {
+      const msg = JSON.parse(data);
+
+      if (msg.event === 'start') {
+        // Call started - set up IDs and send welcome message
+        streamSid = msg.start.streamSid;
+        callSid = msg.start.callSid;
+        streamService.setStreamSid(streamSid);
+        gptService.setCallSid(callSid);
+        console.log(`Twilio -> Starting Media Stream for ${streamSid}`.underline.red);
+        ttsService.generate({ partialResponseIndex: null, partialResponse: 'Halo! • Ada yang bisa saya • bantu hari ini?' }, 0);
+      }
+      else if (msg.event === 'media') {
+        // Received audio from caller - send to transcription
+        transcriptionService.send(msg.media.payload);
+      }
+      else if (msg.event === 'mark') {
+        // Audio piece finished playing
+        const label = msg.mark.name;
+        console.log(`Twilio -> Audio completed mark (${msg.sequenceNumber}): ${label}`.red);
+        marks = marks.filter(m => m !== msg.mark.name);
+      }
+      else if (msg.event === 'stop') {
+        // Call ended
+        console.log(`Twilio -> Media stream ${streamSid} ended.`.underline.red);
+      }
+    });
+
+    // Handle interruptions (caller speaking while assistant is)
+    transcriptionService.on('utterance', async (text) => {
+      if (marks.length > 0 && text?.length > 5) {
+        console.log('Twilio -> Interruption, Clearing stream'.red);
+        ws.send(
+          JSON.stringify({
+            streamSid,
+            event: 'clear',
+          })
+        );
+      }
+    });
+
+    // Process transcribed text through GPT
+    transcriptionService.on('transcription', async (text) => {
+      if (!text) { return; }
+      console.log(`Interaction ${interactionCount} – STT -> GPT: ${text}`.yellow);
+      gptService.completion(text, interactionCount);
+      interactionCount += 1;
+    });
+
+    // Send GPT's response to text-to-speech
+    gptService.on('gptreply', async (gptReply, icount) => {
+      console.log(`Interaction ${icount}: GPT -> TTS: ${gptReply.partialResponse}`.green);
+      ttsService.generate(gptReply, icount);
+    });
+
+    // Send converted speech to caller
+    ttsService.on('speech', (responseIndex, audio, label, icount) => {
+      console.log(`Interaction ${icount}: TTS -> TWILIO: ${label}`.blue);
+      streamService.buffer(responseIndex, audio);
+    });
+
+    // Track when audio pieces are sent
+    streamService.on('audiosent', (markLabel) => {
+      marks.push(markLabel);
+    });
   } catch (err) {
     console.log(err);
   }
@@ -126,91 +213,7 @@ app.ws('/connection', (ws) => {
   }
 });
 
-app.ws('/connection-v2', (ws) => {
-  try {
-    ws.on('error', console.error);
 
-    // Variables to track the call and its audio
-    let streamSid;
-    let callSid;
-    const gptService = new GptService();
-    const streamService = new StreamService(ws);
-    const transcriptionService = new TranscriptionService();
-    const ttsService = new MinimaxiTTSService({});
-
-    let marks = [];              // Track audio completion markers
-    let interactionCount = 0;    // Count back-and-forth exchanges
-
-    // Handle incoming messages from Twilio
-    ws.on('message', function message(data) {
-      const msg = JSON.parse(data);
-
-      if (msg.event === 'start') {
-        // Call started - set up IDs and send welcome message
-        streamSid = msg.start.streamSid;
-        callSid = msg.start.callSid;
-        streamService.setStreamSid(streamSid);
-        gptService.setCallSid(callSid);
-        console.log(`Twilio -> Starting Media Stream for ${streamSid}`.underline.red);
-        ttsService.generate({ partialResponseIndex: null, partialResponse: 'Welcome to Cybersphere Automotive. • How can I help you today?' }, 0);
-      }
-      else if (msg.event === 'media') {
-        // Received audio from caller - send to transcription
-        transcriptionService.send(msg.media.payload);
-      }
-      else if (msg.event === 'mark') {
-        // Audio piece finished playing
-        const label = msg.mark.name;
-        console.log(`Twilio -> Audio completed mark (${msg.sequenceNumber}): ${label}`.red);
-        marks = marks.filter(m => m !== msg.mark.name);
-      }
-      else if (msg.event === 'stop') {
-        // Call ended
-        console.log(`Twilio -> Media stream ${streamSid} ended.`.underline.red);
-      }
-    });
-
-    // Handle interruptions (caller speaking while assistant is)
-    transcriptionService.on('utterance', async (text) => {
-      if (marks.length > 0 && text?.length > 5) {
-        console.log('Twilio -> Interruption, Clearing stream'.red);
-        ws.send(
-          JSON.stringify({
-            streamSid,
-            event: 'clear',
-          })
-        );
-      }
-    });
-
-    // Process transcribed text through GPT
-    transcriptionService.on('transcription', async (text) => {
-      if (!text) { return; }
-      console.log(`Interaction ${interactionCount} – STT -> GPT: ${text}`.yellow);
-      gptService.completion(text, interactionCount);
-      interactionCount += 1;
-    });
-
-    // Send GPT's response to text-to-speech
-    gptService.on('gptreply', async (gptReply, icount) => {
-      console.log(`Interaction ${icount}: GPT -> TTS: ${gptReply.partialResponse}`.green);
-      ttsService.generate(gptReply, icount);
-    });
-
-    // Send converted speech to caller
-    ttsService.on('speech', (responseIndex, audio, label, icount) => {
-      console.log(`Interaction ${icount}: TTS -> TWILIO: ${label}`.blue);
-      streamService.buffer(responseIndex, audio);
-    });
-
-    // Track when audio pieces are sent
-    streamService.on('audiosent', (markLabel) => {
-      marks.push(markLabel);
-    });
-  } catch (err) {
-    console.log(err);
-  }
-});
 
 app.ws('/connection-v3', (ws) => {
   try {
@@ -289,6 +292,132 @@ app.ws('/connection-v3', (ws) => {
     });
 
     // Track when audio pieces are sent
+    streamService.on('audiosent', (markLabel) => {
+      marks.push(markLabel);
+    });
+  } catch (err) {
+    console.log(err);
+  }
+});
+
+app.ws('/connection-v4', (ws) => {
+  try {
+    ws.on('error', console.error);
+
+    // Variabel untuk melacak panggilan dan audionya
+    let streamSid;
+    let callSid;
+    const gptService = new GptService();
+    const streamService = new StreamService(ws);
+    const transcriptionService = new TranscriptionService();
+    // Menambahkan parameter bahasa ke service TTS agar menggunakan Bahasa Indonesia
+    const ttsService = new MinimaxiTTSService({ language: "id-ID" });
+
+    let marks = [];              // Melacak marker penyelesaian audio
+    let interactionCount = 0;    // Menghitung jumlah interaksi
+
+    // Handle pesan masuk dari Twilio
+    ws.on('message', function message(data) {
+      // Cetak seluruh data yang diterima dari Twilio
+      // console.log("Pesan masuk dari Twilio:", data);
+
+      let msg;
+      try {
+        msg = JSON.parse(data);
+      } catch (err) {
+        console.error("Gagal melakukan parse JSON:", err);
+        return;
+      }
+
+      // Cetak pesan yang sudah di-parse untuk keperluan debugging
+
+      if (msg.event === 'start') {
+        // Panggilan dimulai - atur ID dan kirim pesan selamat datang
+        streamSid = msg.start.streamSid;
+        callSid = msg.start.callSid;
+        streamService.setStreamSid(streamSid);
+        gptService.setCallSid(callSid);
+        console.log(`Twilio -> Starting Media Stream for ${streamSid}`.underline.red);
+        // Ubah pesan selamat datang ke Bahasa Indonesia
+        ttsService.generate({
+          partialResponseIndex: null,
+          partialResponse: 'Halo! • Ada yang bisa saya • bantu hari ini?'
+        }, 0);
+      } else if (msg.event === 'media') {
+        // Menerima audio dari pemanggil - kirim ke transkripsi
+        transcriptionService.send(msg.media.payload);
+      } else if (msg.event === 'mark') {
+        // Audio selesai diputar
+        const label = msg.mark.name;
+        console.log(`Twilio -> Audio completed mark (${msg.sequenceNumber}): ${label}`.red);
+        marks = marks.filter(m => m !== msg.mark.name);
+      } else if (msg.event === 'stop') {
+        // Panggilan berakhir
+        console.log(`Twilio -> Media stream ${streamSid} ended.`.underline.red);
+      }
+    });
+
+    // Menangani interupsi (pemanggil berbicara saat asisten sedang bicara)
+    transcriptionService.on('utterance', async (text) => {
+      if (marks.length > 0 && text?.length > 5) {
+        console.log('Twilio -> Interruption, Clearing stream'.red);
+        ws.send(
+          JSON.stringify({
+            streamSid,
+            event: 'clear',
+          })
+        );
+      }
+    });
+
+    // Proses teks transkripsi melalui GPT
+    // Proses teks transkripsi melalui GPT dan deteksi kata kunci
+    transcriptionService.on('transcription', async (text) => {
+      if (!text) {
+        return;
+      }
+
+      console.log(`Interaction ${interactionCount} – STT -> GPT: ${text}`.yellow);
+
+      // Deteksi kata kunci dalam teks yang diterima
+      // Misalnya, kita ingin mendeteksi kata "bantuan", "layanan", atau "keamanan"
+      const keywords = ['bantuan', 'layanan', 'keamanan'];
+      const lowerText = text.toLowerCase();
+      const detectedKeywords = keywords.filter(keyword => lowerText.includes(keyword));
+
+      if (detectedKeywords.length > 0) {
+        console.log(`Kata kunci terdeteksi: ${detectedKeywords.join(', ')}`);
+        // Anda bisa menambahkan aksi lain, misalnya:
+        // - Mengirim respon khusus
+        // - Memanggil service tertentu
+        // - Mengubah alur percakapan
+      }
+
+      // Lanjutkan pemrosesan teks ke GPT
+      gptService.completion(text, interactionCount);
+      interactionCount += 1;
+    });
+
+    // transcriptionService.on('transcription', async (text) => {
+    //   if (!text) { return; }
+    //   console.log(`Interaction ${interactionCount} – STT -> GPT: ${text}`.yellow);
+    //   gptService.completion(text, interactionCount);
+    //   interactionCount += 1;
+    // });
+
+    // Kirim respons GPT ke TTS
+    gptService.on('gptreply', async (gptReply, icount) => {
+      console.log(`Interaction ${icount}: GPT -> TTS: ${gptReply.partialResponse}`.green);
+      ttsService.generate(gptReply, icount);
+    });
+
+    // Kirim audio hasil TTS ke pemanggil
+    ttsService.on('speech', (responseIndex, audio, label, icount) => {
+      console.log(`Interaction ${icount}: TTS -> TWILIO: ${label}`.blue);
+      streamService.buffer(responseIndex, audio);
+    });
+
+    // Melacak saat audio sudah dikirim
     streamService.on('audiosent', (markLabel) => {
       marks.push(markLabel);
     });

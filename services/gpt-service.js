@@ -12,22 +12,11 @@ class GptService extends EventEmitter {
       // Initial instructions and info for the AI
       {
         "role": "system",
-        "content": `Anda adalah asisten yang membantu untuk CyberSpare. 
-      Berikan respons yang singkat namun ramah. Jangan menanyakan lebih dari satu pertanyaan dalam satu waktu. 
-      Jika ditanya tentang layanan yang tidak tercantum di bawah ini, jelaskan dengan sopan bahwa kami tidak menawarkan layanan tersebut, 
-      tetapi dapat merekomendasikan toko lain.
-    
-      Informasi Utama:
-      - Jam Operasional: Senin hingga Jumat, 9 AM - 5 PM
-      - Alamat: Jakarta
-      - Layanan: Keamanan Siber
-    
-      Anda harus menambahkan simbol '•' setiap 5 kata pada jeda alami dalam respons Anda untuk pemisahan dalam text-to-speech. 
-      PASTIKAN SELALU MENJAWAB DALAM BAHASA INDONESIA.`
+        "content": "Anda adalah asisten yang siap membantu menjawab pertanyaan dengan respons yang singkat, jelas, dan ramah. Jangan mengajukan lebih dari satu pertanyaan dalam satu waktu. Gunakan simbol '•' setiap 5 kata pada jeda alami dalam respons untuk mempermudah *text-to-speech*. Pastikan selalu menjawab dalam bahasa Indonesia."
       },
 
       // Welcome message
-      { 'role': 'assistant', 'content': 'Welcome to CyberSpare. • Ada yang bisa kami bantu ?' },
+      { "role": "assistant", "content": "Halo! • Ada yang bisa • saya • bantu hari ini?" }
     ],
       this.partialResponseIndex = 0;    // Tracks pieces of response for order
   }
@@ -53,7 +42,7 @@ class GptService extends EventEmitter {
 
     // Get streaming response from GPT
     const stream = await this.openai.chat.completions.create({
-      model: 'chatgpt-4o-latest',
+      model: 'gpt-4o-mini',
       messages: this.userContext,
       stream: true,
     });
